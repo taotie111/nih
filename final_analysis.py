@@ -49,13 +49,13 @@ def prepare_data(df):
     df = df[df.get('glaucoma_baseline', 0) == 0]
     
     # 基础筛选
-    df = df[df['followup_duration_cataract'].notna() & (df['followup_duration_cataract'] >= 365)]
+    df = df[df['followup_duration_cataract'].notna() & (df['followup_duration_cataract'] >= 730)]
     fa_cols = ['fatty_acids_n3', 'fatty_acids_dha', 'fatty_acids_n6', 'fatty_acids_pufa', 'fatty_acids_total']
     df = df.dropna(subset=fa_cols)
     
     # 事件定义
     df['event'] = np.where(
-        df['cataract_time_to_event_days'].notna() & (df['cataract_time_to_event_days'] >= 365), 1, 0
+        df['cataract_time_to_event_days'].notna() & (df['cataract_time_to_event_days'] >= 730), 1, 0
     )
     
     print(f"筛选后样本: {len(df):,}, 病例: {(df['event']==1).sum():,}, 对照: {(df['event']==0).sum():,}")
@@ -66,26 +66,45 @@ def prepare_data(df):
 # ============================================================================
 
 def psm_match(df, match_vars=['age_baseline', 'sex'], caliper=0.1):
+    import warnings
+    warnings.filterwarnings('ignore')
+    
     X = df[match_vars].copy()
+    # 填充缺失值（使用中位数或众数）
+    for col in match_vars:
+        if X[col].isna().any():
+            if X[col].dtype in ['float64', 'int64']:
+                X[col] = X[col].fillna(X[col].median())
+            else:
+                X[col] = X[col].fillna(X[col].mode()[0] if len(X[col].mode()) > 0 else X[col].iloc[0])
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    ps_model = LogisticRegression(random_state=42, max_iter=1000)
+    ps_model = LogisticRegression(random_state=42, max_iter=500, solver='lbfgs')
     ps_model.fit(X_scaled, df['event'])
     df['ps'] = ps_model.predict_proba(X_scaled)[:, 1]
     
-    case_df = df[df['event']==1].copy()
-    ctrl_df = df[df['event']==0].copy()
-    dist = cdist(case_df['ps'].values.reshape(-1,1), ctrl_df['ps'].values.reshape(-1,1), 'euclidean')
+    case_df = df[df['event']==1].copy().reset_index(drop=True)
+    ctrl_df = df[df['event']==0].copy().reset_index(drop=True)
+    
+    case_ps = case_df['ps'].values
+    ctrl_ps = ctrl_df['ps'].values
+    case_ids = case_df['participant_id'].values
+    ctrl_ids = ctrl_df['participant_id'].values
     
     pairs = []
     used = set()
+    
+    sorted_idx = np.argsort(np.abs(case_ps[:, np.newaxis] - ctrl_ps), axis=1)
+    
     for i in range(len(case_df)):
-        for j in np.argsort(dist[i]):
-            if ctrl_df.iloc[j]['participant_id'] not in used:
-                if abs(case_df.iloc[i]['ps'] - ctrl_df.iloc[j]['ps']) < caliper:
-                    pairs.append((case_df.iloc[i]['participant_id'], ctrl_df.iloc[j]['participant_id']))
-                    used.add(ctrl_df.iloc[j]['participant_id'])
+        for j_idx in sorted_idx[i]:
+            j = sorted_idx[i][j_idx]
+            ctrl_id = ctrl_ids[j]
+            if ctrl_id not in used:
+                if abs(case_ps[i] - ctrl_ps[j]) < caliper:
+                    pairs.append((case_ids[i], ctrl_id))
+                    used.add(ctrl_id)
                     break
     
     ids = [p[0] for p in pairs] + [p[1] for p in pairs]
@@ -183,7 +202,7 @@ def main():
     # 协变量定义
     covars_model1 = ['age_baseline', 'sex']
     covars_model2 = ['age_baseline', 'sex', 'bmi_baseline', 'smoking_status_baseline', 'alcohol_frequency_baseline']
-    covars_model3 = covars_model2 + ['hypertension_baseline', 'diabetes_baseline', 'heart_disease_composite']
+    covars_model3 = covars_model2 + ['hypertension_baseline']
     
     fa_vars = [
         ('DHA', 'fatty_acids_dha'),
@@ -294,7 +313,7 @@ def main():
         except:
             pass
     
-    # ===== 5. 敏感性分析 =====
+# ===== 5. 敏感性分析 =====
     print("\n" + "="*70)
     print("5. 敏感性分析")
     print("="*70)
